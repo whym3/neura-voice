@@ -12,6 +12,9 @@ A sophisticated AI assistant with speech-to-speech capabilities built on a moder
 
 ## Changelog
 
+- Added support for Open-ai models
+- Background changes
+
 **v1.5.0** (Vision Update) - April 12, 2025
 - 🔍 New image analysis capability powered by [SmolVLM-256M-Instruct model](https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct)
 - 🖼️ Seamless image upload and processing interface
