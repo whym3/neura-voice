@@ -18,6 +18,7 @@ from .services.transcription import WhisperTranscriber
 from .services.llm import LLMClient
 from .services.tts import TTSClient
 from .services.vision import vision_service
+from .services.openai_agent import OpenAIAgent
 
 # Import routes
 from .routes.websocket import websocket_endpoint
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 transcription_service = None
 llm_service = None
 tts_service = None
+openai_agent_service = None
 # Vision service is a singleton already initialized in its module
 
 @asynccontextmanager
@@ -46,7 +48,7 @@ async def lifespan(app: FastAPI):
     # Initialize services on startup
     logger.info("Initializing services...")
     
-    global transcription_service, llm_service, tts_service
+    global transcription_service, llm_service, tts_service, openai_agent_service
     
     # Initialize transcription service
     transcription_service = WhisperTranscriber(
@@ -54,18 +56,33 @@ async def lifespan(app: FastAPI):
         sample_rate=cfg["audio_sample_rate"]
     )
     
-    # Initialize LLM service
+    # Initialize LLM service (for local AI)
     llm_service = LLMClient(
         api_endpoint=cfg["llm_api_endpoint"]
     )
     
-    # Initialize TTS service
+    # Initialize TTS service (for local AI)
     tts_service = TTSClient(
         api_endpoint=cfg["tts_api_endpoint"],
         model=cfg["tts_model"],
         voice=cfg["tts_voice"],
         output_format=cfg["tts_format"]
     )
+    
+    # Initialize OpenAI Agent service if configured
+    if cfg["use_openai"] and cfg["openai_api_key"]:
+        try:
+            openai_agent_service = OpenAIAgent(
+                api_key=cfg["openai_api_key"],
+                model=cfg["openai_model"]
+            )
+            logger.info("OpenAI Agent service initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI Agent service: {e}")
+            openai_agent_service = None
+    else:
+        logger.info("OpenAI Agent service not configured, using local AI services")
+        openai_agent_service = None
     
     # Initialize vision service (will download model if not cached)
     logger.info("Initializing vision service...")
@@ -155,7 +172,8 @@ async def websocket_route(websocket: WebSocket):
         websocket, 
         transcription_service, 
         llm_service, 
-        tts_service
+        tts_service,
+        openai_agent_service
     )
 
 # Run server directly if executed as script

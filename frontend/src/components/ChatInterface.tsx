@@ -711,7 +711,7 @@ const ChatInterface: React.FC = () => {
   };
 
   return (
-    <div className="relative min-h-screen bg-gradient-radial from-[#1a1025] via-[#0d0a1f] to-[#06040f] text-slate-200 flex flex-col">
+    <div className="relative min-h-screen bg-gradient-radial from-[#000000] via-[#121212] to-[#171618] text-slate-200 flex flex-col">
       {/* Custom animation styles */}
       <style>{`
         @keyframes colorCycle {

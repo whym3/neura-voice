@@ -18,6 +18,7 @@ from datetime import datetime
 from ..services.transcription import WhisperTranscriber
 from ..services.llm import LLMClient
 from ..services.tts import TTSClient
+from ..services.openai_agent import OpenAIAgent
 from ..services.conversation_storage import ConversationStorage
 
 # Configure logging
@@ -68,7 +69,8 @@ class WebSocketManager:
         self,
         transcriber: WhisperTranscriber,
         llm_client: LLMClient,
-        tts_client: TTSClient
+        tts_client: TTSClient,
+        openai_agent: Optional[OpenAIAgent] = None
     ):
         """
         Initialize the WebSocket manager.
@@ -77,10 +79,12 @@ class WebSocketManager:
             transcriber: Whisper transcription service
             llm_client: LLM client service
             tts_client: TTS client service
+            openai_agent: Optional OpenAI Agent service
         """
         self.transcriber = transcriber
         self.llm_client = llm_client
         self.tts_client = tts_client
+        self.openai_agent = openai_agent
         
         # State tracking
         self.active_connections: List[WebSocket] = []
@@ -297,27 +301,40 @@ class WebSocketManager:
             # Check if we have recent vision context to incorporate
             has_vision_context = self.current_vision_context is not None
             
-            if has_vision_context:
-                logger.info("Processing speech with vision context")
+            # Use OpenAI Agent if available, otherwise use local LLM
+            if self.openai_agent:
+                logger.info("Using OpenAI Agent for processing")
+                await self._send_status(websocket, "processing_llm", {"using_openai": True})
                 
-                # Add vision context to conversation history
-                self._add_vision_context_to_conversation(self.current_vision_context)
+                if has_vision_context:
+                    logger.info("Processing speech with vision context using OpenAI")
+                    # Add vision context to conversation history
+                    self._add_vision_context_to_conversation(self.current_vision_context)
+                    enhanced_transcript = f"{transcript} [Note: This question refers to the image I just analyzed.]"
+                    llm_response = self.openai_agent.get_response(enhanced_transcript, self.system_prompt)
+                    self.current_vision_context = None
+                else:
+                    llm_response = self.openai_agent.get_response(transcript, self.system_prompt)
                 
-                # Enhance user query with vision context reference
-                enhanced_transcript = f"{transcript} [Note: This question refers to the image I just analyzed.]"
-                
-                # Get LLM response with vision-aware context
-                await self._send_status(websocket, "processing_llm", {"has_vision_context": True})
-                llm_response = self.llm_client.get_response(enhanced_transcript, self.system_prompt)
-                
-                # Clear vision context after use to avoid affecting future non-vision conversations
-                # Only clear after successful processing
-                self.current_vision_context = None
-                logger.info("Vision context processed and cleared")
+                # Generate TTS using OpenAI's native TTS
+                await self._send_openai_tts_response(websocket, llm_response["text"])
             else:
-                # Normal non-vision processing
-                await self._send_status(websocket, "processing_llm", {})
-                llm_response = self.llm_client.get_response(transcript, self.system_prompt)
+                # Use local AI services
+                logger.info("Using local AI services for processing")
+                await self._send_status(websocket, "processing_llm", {"using_openai": False})
+                
+                if has_vision_context:
+                    logger.info("Processing speech with vision context using local AI")
+                    # Add vision context to conversation history
+                    self._add_vision_context_to_conversation(self.current_vision_context)
+                    enhanced_transcript = f"{transcript} [Note: This question refers to the image I just analyzed.]"
+                    llm_response = self.llm_client.get_response(enhanced_transcript, self.system_prompt)
+                    self.current_vision_context = None
+                else:
+                    llm_response = self.llm_client.get_response(transcript, self.system_prompt)
+                
+                # Generate and send TTS audio using local TTS
+                await self._send_tts_response(websocket, llm_response["text"])
             
             # Send LLM response
             await websocket.send_json({
@@ -327,9 +344,6 @@ class WebSocketManager:
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Generate and send TTS audio
-            await self._send_tts_response(websocket, llm_response["text"])
-            
         except Exception as e:
             logger.error(f"Error processing speech segment: {e}")
             await self._send_error(websocket, f"Speech processing error: {str(e)}")
@@ -338,7 +352,7 @@ class WebSocketManager:
     
     async def _send_tts_response(self, websocket: WebSocket, text: str):
         """
-        Generate and send TTS audio.
+        Generate and send TTS audio using local TTS service.
         
         Args:
             websocket: The WebSocket connection
@@ -384,6 +398,55 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"Error streaming TTS: {e}")
             await self._send_error(websocket, f"TTS streaming error: {str(e)}")
+    
+    async def _send_openai_tts_response(self, websocket: WebSocket, text: str):
+        """
+        Generate and send TTS audio using OpenAI's TTS API.
+        
+        Args:
+            websocket: The WebSocket connection
+            text: Text to convert to speech
+        """
+        if not text.strip():
+            logger.info("Empty text for TTS, skipping")
+            return
+        
+        try:
+            # Signal TTS start
+            await websocket.send_json({
+                "type": MessageType.TTS_START,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            await self._send_status(websocket, "generating_speech", {})
+            
+            # Get the complete audio file from OpenAI TTS
+            audio_data = await self.openai_agent.text_to_speech(text)
+            
+            # Check if playback should be interrupted
+            if self.interrupt_playback.is_set():
+                logger.info("TTS generation interrupted")
+                return
+            
+            # Encode and send the complete audio file
+            encoded_audio = base64.b64encode(audio_data).decode("utf-8")
+            await websocket.send_json({
+                "type": MessageType.TTS_CHUNK,
+                "audio_chunk": encoded_audio,
+                "format": "mp3",  # OpenAI TTS returns MP3 format
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Signal TTS end
+            if not self.interrupt_playback.is_set():
+                await websocket.send_json({
+                    "type": MessageType.TTS_END,
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+        except Exception as e:
+            logger.error(f"Error streaming OpenAI TTS: {e}")
+            await self._send_error(websocket, f"OpenAI TTS streaming error: {str(e)}")
     
     def _load_user_profile(self) -> Dict[str, Any]:
         """
@@ -1189,7 +1252,8 @@ async def websocket_endpoint(
     websocket: WebSocket,
     transcriber: WhisperTranscriber,
     llm_client: LLMClient,
-    tts_client: TTSClient
+    tts_client: TTSClient,
+    openai_agent: Optional[OpenAIAgent] = None
 ):
     """
     FastAPI WebSocket endpoint.
@@ -1199,9 +1263,10 @@ async def websocket_endpoint(
         transcriber: Whisper transcription service
         llm_client: LLM client service
         tts_client: TTS client service
+        openai_agent: Optional OpenAI Agent service
     """
     # Create WebSocket manager
-    manager = WebSocketManager(transcriber, llm_client, tts_client)
+    manager = WebSocketManager(transcriber, llm_client, tts_client, openai_agent)
     
     try:
         # Accept connection
