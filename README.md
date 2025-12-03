@@ -1,4 +1,3 @@
-![Vocalis - Speech-to-Speech AI Assistant](https://lex-au.github.io/Vocalis/Vocalis_Header.png)
 
 # Vocalis
 
